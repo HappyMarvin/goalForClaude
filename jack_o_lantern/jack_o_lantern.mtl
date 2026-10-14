@@ -1,0 +1,16 @@
+# Jack-o'-lantern materials
+newmtl pumpkin_skin
+Ka 0 0 0
+Kd 0.95 0.42 0.05
+Ks 0.25 0.20 0.15
+Ns 40
+d 1
+illum 2
+
+newmtl pumpkin_inside
+Ka 0 0 0
+Kd 0.22 0.08 0.02
+Ks 0.02 0.02 0.02
+Ns 5
+d 1
+illum 2
