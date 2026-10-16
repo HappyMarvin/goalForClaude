@@ -2,9 +2,9 @@
 Builds all printable files from form/forForm.zip (forForm.blend):
   print/pumpkin_for_mold.stl      - master for the silicone mold (80 mm tall, mounting holes in the bottom)
   print/pumpkin_no_holes.stl      - the same figure without mounting holes
-  print/mold_shell_A.stl          - shell half A (with ridge on the flange faces)
-  print/mold_shell_B.stl          - shell half B (with groove)
-  print/mold_base.stl             - base plate: plinth for the pumpkin, centering boss + pin, ears for the bottom bolts
+  print/mold_shell_A.stl          - shell half A (ridge on the seam lip)
+  print/mold_shell_B.stl          - shell half B (groove on the seam lip)
+  print/mold_base.stl             - round base: plinth for the pumpkin, centering boss + pin, ears for the bottom bolts
 
 Requires: bpy (Blender as a python module), numpy, scipy, trimesh, manifold3d, pymeshlab, shapely
 Run:  python3 build_mold.py            (from any directory)
@@ -32,16 +32,17 @@ BOSS_D, BOSS_H = 14.0, 3.0  # centering boss on the plinth
 PIN_D, PIN_X = 6.0, 12.0    # anti-rotation pin, toward the face (+X in the assembly frame)
 REC_CLR, REC_DEPTH = 0.25, 3.4
 PILOT_D, PILOT_TOP = 3.4, 30.0   # pilot hole for the M4 bolt that holds the pumpkin on the base
-WALL = 3.0                  # shell wall
-FL_T, FL_X = 5.0, 68.0      # flange thickness per half, flange outer edge
-FIN_T, FIN_Y = 4.0, 64.0    # middle fins (stiffness + the shell stands on them upside down)
-BOLT_D, BOLT_X = 4.5, 60.0  # M4 clearance holes
+WALL = 1.8                  # shell wall: 2 perimeters from each side, no infill (silicone pressure is only ~1 kPa)
+LIP_T, LIP_W = 4.0, 9.0     # seam lip: thickness per half, width measured from the cavity (carries ridge/groove)
+LUG_H, LUG_M = 7.0, 6.5     # bolt lugs: half height around the bolt, material beyond the bolt axis
+BOLT_D = 4.5                # M4 clearance holes
 BOLT_Z = [8.0, 50.0, 86.0]  # the lowest one also goes through the base ears
+FOOT_R, FOOT_T = 46.0, 3.0  # small 45-deg feet at the rim: the shell stands upside down for casting
 RIDGE_IN, RIDGE_OUT, RIDGE_H = 4.0, 6.0, 1.5
 GROOVE_CLR, GROOVE_D = 0.3, 1.9
-BASE_T, BASE_X, BASE_Y, BASE_R = 6.0, 70.0, 66.0, 8.0
-EAR_T, EAR_GAP, EAR_X0, EAR_X1, EAR_H = 4.0, 0.2, 55.5, 67.0, 15.0
-CB_D, CB_DEPTH = 10.0, 4.5  # counterbore for the bolt head under the base
+BASE_T, BASE_LEDGE = 3.0, 5.0   # round base: thickness, ledge outside the shell wall (for the hot-glue bead)
+EAR_T, EAR_GAP = 4.0, 0.2
+CB_D = 10.0                 # pocket for the bolt head under the base (goes up into the plinth)
 SEG = 240
 
 def log(*a): print(*a, flush=True)
@@ -178,16 +179,37 @@ def make_mold(PV, PF, PVm, PFm):
     # wall band reaches 0.5 mm into the cavity so the 3D cavity cut is transversal (no coincident surfaces)
     cs_wall = (cs_cav.offset(WALL, mf.JoinType.Round, 2.0, 64) - cs_cav.offset(-0.5, mf.JoinType.Round, 2.0, 64)) ^ mf.CrossSection.square([300, Z_RIM + 2]).translate([0, -1])
     wall = mf.Manifold.revolve(cs_wall, SEG)
-    shell = (wall + box(-FL_X, FL_X, -FL_T, FL_T, -1, Z_RIM + 1) + box(-FIN_T/2, FIN_T/2, -FIN_Y, FIN_Y, -1, Z_RIM + 1)) - cavity
+    r_out = r_in + WALL*np.sqrt(1 + np.gradient(r_in, zb)**2)          # horizontal outer radius of the wall
+    rmax_in = lambda z0, z1: r_in[(zb >= max(z0, 0)) & (zb <= min(z1, Z_RIM))].max()
+    rmax_out = lambda z0, z1: r_out[(zb >= max(z0, 0)) & (zb <= min(z1, Z_RIM))].max()
+    # bolt positions: washer (D9) clears the wall, hole clears the ridge/groove
+    bolt_x = [float(np.ceil(max(rmax_out(z - 5.5, z + 5.5) + 5.0, rmax_in(z - 3, z + 3) + RIDGE_OUT + GROOVE_CLR + 1.0 + BOLT_D/2)*2)/2) for z in BOLT_Z]
+    def xz_plate(poly, t, axis='y'):   # polygon in (u, z), extruded +-t along y (u = x) or along x (u = y)
+        P = np.asarray(poly, float)
+        if np.sum(P[:, 0]*np.roll(P[:, 1], -1) - np.roll(P[:, 0], -1)*P[:, 1]) < 0: P = P[::-1]   # make CCW
+        m = mf.Manifold.extrude(mf.CrossSection([P]), 2*t).rotate([90, 0, 0]).translate([0, t, 0])
+        return m if axis == 'y' else m.rotate([0, 0, 90])
+    lip_pts = [(np.interp(z, zb, r_in) + LIP_W, z) for z in zz]
+    lip_poly = [(lip_pts[0][0], -1.0)] + lip_pts + [(lip_pts[-1][0], Z_RIM + 1.0)]
+    lip_poly = lip_poly + [(-x, z) for x, z in lip_poly[::-1]]
+    parts_ = [wall, xz_plate(lip_poly, LIP_T)]
+    notch = None
+    for sx in (-1, 1):
+        for bz, bx in zip(BOLT_Z, bolt_x):
+            xo = bx + LUG_M; zt = min(bz + LUG_H, Z_RIM + 1.0); zb_ = bz - LUG_H
+            poly = [(0, zt), (xo, zt), (xo, -1.0), (0, -1.0)] if zb_ <= 2.0 else [(0, zt), (xo, zt), (xo, zb_), (0, zb_ - xo)]   # 45-deg underside
+            parts_.append(xz_plate([(sx*x, z) for x, z in poly], LIP_T))
+            z0 = 0.0 if zb_ <= 2.0 else zb_
+            n_ = mf.Manifold.cube([3.0, 3.0, zt - z0], True).rotate([0, 0, 45]).translate([sx*xo, 0, (zt + z0)/2])   # V-notch to pry halves apart
+            notch = n_ if notch is None else notch + n_
+    for sy in (-1, 1):   # feet at the rim on the two faces without lugs, 45-deg underside
+        poly = [(0, Z_RIM + 1.0), (FOOT_R, Z_RIM + 1.0), (FOOT_R, Z_RIM), (0, Z_RIM - FOOT_R)]
+        parts_.append(xz_plate([(sy*y, z) for y, z in poly], FOOT_T/2, axis='x'))
     holes = None
     for sx in (-1, 1):
-        for bz in BOLT_Z:
-            h = teardrop_y(sx*BOLT_X, bz, BOLT_D); holes = h if holes is None else holes + h
-    notch = None
-    for sx in (-1, 1):   # V-notch at the outer flange edge along the seam (to pry the halves apart)
-        n_ = mf.Manifold.cube([3.0, 3.0, Z_RIM + 2], True).rotate([0, 0, 45]).translate([sx*FL_X, 0, Z_RIM/2])
-        notch = n_ if notch is None else notch + n_
-    shell = shell - holes - notch
+        for bz, bx in zip(BOLT_Z, bolt_x):
+            h = teardrop_y(sx*bx, bz, BOLT_D); holes = h if holes is None else holes + h
+    shell = mf.Manifold.batch_boolean(parts_, mf.OpType.Add) - cavity - holes - notch
     def band(off0, off1, y0, y1, z0=-1.0, z1=Z_RIM + 1.0):
         out = None
         for sx in (-1, 1):
@@ -202,8 +224,15 @@ def make_mold(PV, PF, PVm, PFm):
     trim = box(-200, 200, -200, 200, 0, Z_RIM)
     halfA = (((shell ^ box(-200, 200, 0, 200, -10, 200)) + ridge - holes) ^ trim).simplify(1e-4)
     halfB = (((shell ^ box(-200, 200, -200, 0, -10, 200)) - groove) ^ trim).simplify(1e-4)
-    # base
-    plate_cs = mf.CrossSection.square([2*(BASE_X-BASE_R), 2*(BASE_Y-BASE_R)]).translate([-(BASE_X-BASE_R), -(BASE_Y-BASE_R)]).offset(BASE_R, mf.JoinType.Round, 2.0, 96)
+    # base: round plate just past the shell wall + two tabs with ears for the lowest bolts
+    x_b0, z_b0 = bolt_x[0], BOLT_Z[0]
+    ear_top = z_b0 + LUG_M
+    ear_x0 = max(x_b0 - 6.0, rmax_out(0, ear_top) + 0.6); ear_x1 = x_b0 + LUG_M
+    r_disc = rmax_out(0, 3.0) + BASE_LEDGE
+    tab_w = LIP_T + EAR_GAP + EAR_T + 1.5
+    plate_cs = mf.CrossSection.circle(r_disc, 180) + mf.CrossSection.square([2*(ear_x1 + 1.5), 2*tab_w]).translate([-(ear_x1 + 1.5), -tab_w])
+    plate_cs = plate_cs.offset(4, mf.JoinType.Round, 2.0, 64).offset(-4, mf.JoinType.Round, 2.0, 64)    # fillet inner corners
+    plate_cs = plate_cs.offset(-3, mf.JoinType.Round, 2.0, 64).offset(3, mf.JoinType.Round, 2.0, 64)    # round outer corners
     plate = mf.Manifold.extrude(plate_cs, BASE_T).translate([0, 0, -BASE_T])
     sec = trimesh.Trimesh(PV, PF, process=False).section(plane_origin=[0, 0, 0.1], plane_normal=[0, 0, 1]).to_2D(to_2D=np.eye(4))[0]
     foot = max(sec.polygons_full, key=lambda p: p.area)
@@ -215,12 +244,13 @@ def make_mold(PV, PF, PVm, PFm):
     ears = None
     for sx in (-1, 1):
         for sy in (-1, 1):
-            y0 = FL_T + EAR_GAP
-            e = box(min(sx*EAR_X0, sx*EAR_X1), max(sx*EAR_X0, sx*EAR_X1), min(sy*y0, sy*(y0+EAR_T)), max(sy*y0, sy*(y0+EAR_T)), -0.5, EAR_H)
+            y0 = LIP_T + EAR_GAP
+            e = box(min(sx*ear_x0, sx*ear_x1), max(sx*ear_x0, sx*ear_x1), min(sy*y0, sy*(y0+EAR_T)), max(sy*y0, sy*(y0+EAR_T)), -0.5, ear_top)
             ears = e if ears is None else ears + e
     base = plate + platform + boss + pin + ears
-    base = base - cyl(BOLT_D, 40, -20) - cyl(CB_D, CB_DEPTH + 0.01, -BASE_T - 0.01)
-    for sx in (-1, 1): base = base - teardrop_y(sx*BOLT_X, BOLT_Z[0], BOLT_D)
+    base = base - cyl(BOLT_D, 40, -20) - cyl(CB_D, BASE_T + 0.2 + 0.01, -BASE_T - 0.01)   # bolt head pocket ends 0.2 mm inside the plinth
+    for sx in (-1, 1): base = base - teardrop_y(sx*x_b0, z_b0, BOLT_D)
+    log(f"bolts at x=+-{bolt_x} (z={BOLT_Z}); base disc R={r_disc:.1f}, ears x {ear_x0:.1f}..{ear_x1:.1f}")
     # ---- checks
     P_clean = to_manifold(PVa, PF)
     P_master = to_manifold(PVm + [0, 0, Z_P], PFm)
