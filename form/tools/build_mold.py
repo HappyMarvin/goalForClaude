@@ -1,5 +1,6 @@
 """
-Builds all printable files from form/forForm.zip (forForm.blend):
+Builds all printable files from form/forForm.zip (forForm.blend).
+80 mm version -> form/print/, other heights (e.g. --height 60) -> form/print_<H>mm/ :
   print/pumpkin_for_mold.stl      - master for the silicone mold (80 mm tall, mounting holes in the bottom)
   print/pumpkin_no_holes.stl      - the same figure without mounting holes
   print/mold_shell_A.stl          - shell half A (ridge on the seam lip)
@@ -7,7 +8,8 @@ Builds all printable files from form/forForm.zip (forForm.blend):
   print/mold_base.stl             - round base: plinth for the pumpkin, centering boss + pin, ears for the bottom bolts
 
 Requires: bpy (Blender as a python module), numpy, scipy, trimesh, manifold3d, pymeshlab, shapely
-Run:  python3 build_mold.py            (from any directory)
+Run:  python3 build_mold.py                 (80 mm, from any directory)
+      python3 build_mold.py --height 60     (the same pumpkin scaled to 60 mm, shell fitted to it)
 """
 import os, sys, zipfile, tempfile, json
 import numpy as np
@@ -17,33 +19,44 @@ from shapely.geometry.polygon import orient
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FORM = os.path.dirname(HERE)
-OUT = os.path.join(FORM, 'print')
 CACHE = os.path.join(tempfile.gettempdir(), 'pumpkin_mold_cache')
-os.makedirs(OUT, exist_ok=True); os.makedirs(CACHE, exist_ok=True)
+os.makedirs(CACHE, exist_ok=True)
 
 # ---------------------------------------------------------------- parameters (mm)
-HEIGHT = 80.0               # pumpkin height
-TARGET_TRIS = 700_000       # mesh reduction target (max deviation measured ~0.005 mm)
-CX, CY = 0.5, -0.5          # mold axis in the leveled pumpkin frame (minimises silicone)
+REF_HEIGHT = 80.0           # the mesh is leveled and reduced at 80 mm; other sizes are an exact uniform scale of it
+TARGET_TRIS = 700_000       # mesh reduction target (max deviation measured ~0.005 mm at 80 mm)
 T_SIL = 10.0                # minimum silicone thickness
 TOP_SIL = 11.0              # silicone above the pumpkin top (= rim / fill level)
 H_PLAT = 2.0                # plinth under the pumpkin (gives the mold opening a 2 mm wall instead of a feather edge)
-BOSS_D, BOSS_H = 14.0, 3.0  # centering boss on the plinth
-PIN_D, PIN_X = 6.0, 12.0    # anti-rotation pin, toward the face (+X in the assembly frame)
+BOSS_H = 3.0                # centering boss height (diameter etc. per size, see SIZES)
 REC_CLR, REC_DEPTH = 0.25, 3.4
 PILOT_D, PILOT_TOP = 3.4, 30.0   # pilot hole for the M4 bolt that holds the pumpkin on the base
 WALL = 1.8                  # shell wall: 2 perimeters from each side, no infill (silicone pressure is only ~1 kPa)
 LIP_T, LIP_W = 4.0, 9.0     # seam lip: thickness per half, width measured from the cavity (carries ridge/groove)
 LUG_H, LUG_M = 7.0, 6.5     # bolt lugs: half height around the bolt, material beyond the bolt axis
 BOLT_D = 4.5                # M4 clearance holes
-BOLT_Z = [8.0, 50.0, 86.0]  # the lowest one also goes through the base ears
-FOOT_R, FOOT_T = 46.0, 3.0  # small 45-deg feet at the rim: the shell stands upside down for casting
+FOOT_T = 3.0                # small 45-deg feet at the rim (the shell stands upside down for casting)
 RIDGE_IN, RIDGE_OUT, RIDGE_H = 4.0, 6.0, 1.5
 GROOVE_CLR, GROOVE_D = 0.3, 1.9
 BASE_T, BASE_LEDGE = 3.0, 5.0   # round base: thickness, ledge outside the shell wall (for the hot-glue bead)
 EAR_T, EAR_GAP = 4.0, 0.2
 CB_D = 10.0                 # pocket for the bolt head under the base (goes up into the plinth)
 SEG = 240
+# per-size parts: boss / pin must fit the smaller footprint, bolt heights follow the rim, FOOT_R = stand radius
+SIZES = {
+    80: dict(BOSS_D=14.0, PIN_D=6.0, PIN_X=12.0, BOLT_Z=[8.0, 50.0, 86.0], FOOT_R=46.0),
+    60: dict(BOSS_D=10.5, PIN_D=4.5, PIN_X=9.5, BOLT_Z=[8.0, 40.0, 66.0], FOOT_R=38.0),
+}
+
+def configure(height):
+    global HEIGHT, K, CX, CY, OUT, BOSS_D, PIN_D, PIN_X, BOLT_Z, FOOT_R, CLOSE_R
+    HEIGHT = float(height); K = HEIGHT/REF_HEIGHT
+    CX, CY = 0.5*K, -0.5*K  # mold axis in the leveled pumpkin frame (minimises silicone; found at 80 mm)
+    CLOSE_R = 20.0*K        # smoothing radius of the shell profile
+    cfg = SIZES[int(height)]
+    BOSS_D, PIN_D, PIN_X, BOLT_Z, FOOT_R = cfg['BOSS_D'], cfg['PIN_D'], cfg['PIN_X'], cfg['BOLT_Z'], cfg['FOOT_R']
+    OUT = os.path.join(FORM, 'print' if int(height) == 80 else f'print_{int(height)}mm')
+    os.makedirs(OUT, exist_ok=True)
 
 def log(*a): print(*a, flush=True)
 
@@ -80,7 +93,7 @@ def level_and_scale(V0, F):
     vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
     R = np.eye(3) + vx + vx @ vx * ((1 - ct)/s**2)
     V1 = V0 @ R.T
-    z0 = V1[:, 2].min(); sc = HEIGHT/(V1[:, 2].max() - z0)
+    z0 = V1[:, 2].min(); sc = REF_HEIGHT/(V1[:, 2].max() - z0)
     V1 = (V1 - [0, 0, z0])*sc
     log(f"bottom tilt corrected: {np.degrees(np.arccos(ct)):.3f} deg, scale {sc:.4f} mm/unit")
     return V1, dict(R=R, z0=z0, s=sc)
@@ -156,7 +169,7 @@ def shell_profile(PVa, Z_RIM):
         fp = pad(f); dil = np.array([np.max(fp[i:i+2*kk+1] + c) for i in range(len(f))])
         dp = pad(dil); return np.array([np.min(dp[i:i+2*kk+1] - c) for i in range(len(f))])
     r = lean_limit(req)
-    r = np.maximum(r, closing(r, 20.0))
+    r = np.maximum(r, closing(r, CLOSE_R))
     r = lean_limit(np.maximum(req, gaussian_filter1d(r, 0.6/dz, mode='nearest')))
     r = np.maximum(r, req)
     return zb, r, req
@@ -266,14 +279,20 @@ def make_mold(PV, PF, PVm, PFm):
         s = np.abs(z - zq) < 16; best[s] = np.minimum(best[s], np.hypot(rq - rho[s], zq - z[s]))
     best = np.minimum(best, Z_RIM - z)
     log("silicone thickness over the pumpkin: min %.2f, 5%% %.2f, median %.2f mm" % tuple(np.percentile(best, [0, 5, 50])))
-    json.dump(dict(Z_RIM=Z_RIM, Z_P=Z_P, top_opening_d=2*rr[-1], silicone_cm3=sil.volume()/1000), open(os.path.join(CACHE, 'mold.json'), 'w'))
+    json.dump(dict(Z_RIM=Z_RIM, Z_P=Z_P, top_opening_d=2*rr[-1], silicone_cm3=sil.volume()/1000), open(os.path.join(CACHE, f'mold{int(HEIGHT)}.json'), 'w'))
     return dict(halfA=halfA, halfB=halfB, base=base, silicone=sil)
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--height', type=int, default=80, choices=sorted(SIZES), help='pumpkin height, mm')
+    configure(ap.parse_args().height)
     V0, F0 = load_blend()
     log(f"source mesh: {len(V0)} verts, {len(F0)} tris")
     V1, tr = level_and_scale(V0, F0)
     Vd, Fd = decimate(V1, F0)
+    Vd = Vd*K                                   # exact uniform scale of the 80 mm mesh
+    log(f"pumpkin height {HEIGHT:.0f} mm (scale {K:.4f} of the 80 mm version) -> {OUT}")
     PV, PF, PVm, PFm = make_pumpkin(Vd, Fd)
     # print orientation: face (+X in the assembly frame) turned to the front of the bed (-Y), so "seam: back" hides the seam
     rot = lambda V: np.c_[V[:, 1], -V[:, 0], V[:, 2]]
@@ -285,9 +304,10 @@ def main():
         V, F = from_manifold(parts[key]); V = V - [0, 0, V[:, 2].min()]
         save_stl(V, F, name)
     # assembly-frame meshes for previews
+    h = int(HEIGHT)
     for key in ['halfA', 'halfB', 'base', 'silicone']:
-        V, F = from_manifold(parts[key]); np.savez(os.path.join(CACHE, f'asm_{key}.npz'), V=V, F=F)
-    np.savez(os.path.join(CACHE, 'asm_pumpkin.npz'), V=PVm + [0, 0, H_PLAT], F=PFm)
+        V, F = from_manifold(parts[key]); np.savez(os.path.join(CACHE, f'asm{h}_{key}.npz'), V=V, F=F)
+    np.savez(os.path.join(CACHE, f'asm{h}_pumpkin.npz'), V=PVm + [0, 0, H_PLAT], F=PFm)
     np.savez(os.path.join(CACHE, 'level.npz'), **tr)
 
 if __name__ == '__main__':
