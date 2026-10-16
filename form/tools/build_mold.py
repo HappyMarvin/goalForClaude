@@ -42,6 +42,10 @@ BASE_T, BASE_LEDGE = 3.0, 5.0   # round base: thickness, ledge outside the shell
 EAR_T, EAR_GAP = 4.0, 0.2
 CB_D = 10.0                 # pocket for the bolt head under the base (goes up into the plinth)
 SEG = 240
+# the pumpkin sits on the base turned 90 deg (face toward +Y, the middle of half A): the shell seams run along
+# the sides of the face, not across it. Only the base (plinth outline + pin) depends on this; the shell is round.
+FACE_TO_Y = True
+rot90 = lambda V: np.c_[-V[:, 1], V[:, 0], V[:, 2]] if FACE_TO_Y else V   # exact: +X -> +Y
 # per-size parts: boss / pin must fit the smaller footprint, bolt heights follow the rim, FOOT_R = stand radius
 SIZES = {
     80: dict(BOSS_D=14.0, PIN_D=6.0, PIN_X=12.0, BOLT_Z=[8.0, 50.0, 86.0], FOOT_R=46.0),
@@ -181,7 +185,7 @@ def teardrop_y(x, z, dia, y0=-80.0, y1=80.0):     # horizontal hole along Y, poi
 
 def make_mold(PV, PF, PVm, PFm):
     Z_P = H_PLAT; Z_RIM = Z_P + HEIGHT + TOP_SIL
-    PVa = PV + [0, 0, Z_P]
+    PVa = rot90(PV) + [0, 0, Z_P]
     zb, r_in, req = shell_profile(PVa, Z_RIM)
     zz = np.append(zb[::10], Z_RIM) if zb[::10][-1] < Z_RIM else zb[::10]
     rr = np.interp(zz, zb, r_in)
@@ -247,13 +251,14 @@ def make_mold(PV, PF, PVm, PFm):
     plate_cs = plate_cs.offset(4, mf.JoinType.Round, 2.0, 64).offset(-4, mf.JoinType.Round, 2.0, 64)    # fillet inner corners
     plate_cs = plate_cs.offset(-3, mf.JoinType.Round, 2.0, 64).offset(3, mf.JoinType.Round, 2.0, 64)    # round outer corners
     plate = mf.Manifold.extrude(plate_cs, BASE_T).translate([0, 0, -BASE_T])
-    sec = trimesh.Trimesh(PV, PF, process=False).section(plane_origin=[0, 0, 0.1], plane_normal=[0, 0, 1]).to_2D(to_2D=np.eye(4))[0]
+    sec = trimesh.Trimesh(rot90(PV), PF, process=False).section(plane_origin=[0, 0, 0.1], plane_normal=[0, 0, 1]).to_2D(to_2D=np.eye(4))[0]
     foot = max(sec.polygons_full, key=lambda p: p.area)
     foot_in = orient(foot.buffer(-0.3, join_style=1).simplify(0.01), 1.0)
     platform = mf.Manifold.extrude(mf.CrossSection([np.asarray(foot_in.exterior.coords[:-1], float)]), H_PLAT + 0.5).translate([0, 0, -0.5])
     ch = 0.6
     boss = cyl(BOSS_D, BOSS_H - ch + 0.1, H_PLAT - 0.1) + cyl(BOSS_D, ch, H_PLAT + BOSS_H - ch, d_top=BOSS_D - 2*ch)
-    pin = cyl(PIN_D, BOSS_H - ch + 0.1, H_PLAT - 0.1, x=PIN_X) + cyl(PIN_D, ch, H_PLAT + BOSS_H - ch, x=PIN_X, d_top=PIN_D - 2*ch)
+    px, py = (0.0, PIN_X) if FACE_TO_Y else (PIN_X, 0.0)
+    pin = cyl(PIN_D, BOSS_H - ch + 0.1, H_PLAT - 0.1, x=px, y=py) + cyl(PIN_D, ch, H_PLAT + BOSS_H - ch, x=px, y=py, d_top=PIN_D - 2*ch)
     ears = None
     for sx in (-1, 1):
         for sy in (-1, 1):
@@ -266,7 +271,7 @@ def make_mold(PV, PF, PVm, PFm):
     log(f"bolts at x=+-{bolt_x} (z={BOLT_Z}); base disc R={r_disc:.1f}, ears x {ear_x0:.1f}..{ear_x1:.1f}")
     # ---- checks
     P_clean = to_manifold(PVa, PF)
-    P_master = to_manifold(PVm + [0, 0, Z_P], PFm)
+    P_master = to_manifold(rot90(PVm) + [0, 0, Z_P], PFm)
     plinth_solid = mf.Manifold.extrude(mf.CrossSection([np.asarray(foot_in.exterior.coords[:-1], float)]), H_PLAT + 0.7).translate([0, 0, -0.5])
     sil = (cavity ^ box(-200, 200, -200, 200, 0, Z_RIM)) - P_clean - plinth_solid   # (printed bottom is flat: no film under it)
     log(f"shell: rim (= silicone fill level) at z={Z_RIM:.1f} mm, top opening D={2*rr[-1]:.1f} mm, max inner D={2*r_in.max():.1f} mm")
@@ -307,7 +312,7 @@ def main():
     h = int(HEIGHT)
     for key in ['halfA', 'halfB', 'base', 'silicone']:
         V, F = from_manifold(parts[key]); np.savez(os.path.join(CACHE, f'asm{h}_{key}.npz'), V=V, F=F)
-    np.savez(os.path.join(CACHE, f'asm{h}_pumpkin.npz'), V=PVm + [0, 0, H_PLAT], F=PFm)
+    np.savez(os.path.join(CACHE, f'asm{h}_pumpkin.npz'), V=rot90(PVm) + [0, 0, H_PLAT], F=PFm)
     np.savez(os.path.join(CACHE, 'level.npz'), **tr)
 
 if __name__ == '__main__':
